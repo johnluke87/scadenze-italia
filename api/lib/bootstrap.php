@@ -22,7 +22,8 @@ function cfg(): array {
     if (!$c) {
         $c = require dirname(__DIR__) . '/config.php';
         // sul sito: segreti (cron_token...) in private/scadenze-italia.php; in sviluppo: config.local.php
-        foreach ([site_private('scadenze-italia.php'), dirname(__DIR__) . '/config.local.php'] as $file) {
+        // il bot Telegram (token e nome) in private/scadenze-italia-telegram.php
+        foreach ([site_private('scadenze-italia.php'), site_private('scadenze-italia-telegram.php'), dirname(__DIR__) . '/config.local.php'] as $file) {
             if ($file && is_file($file)) {
                 $extra = require $file;
                 if (is_array($extra)) {
@@ -167,6 +168,19 @@ function schema_install(PDO $pdo): void {
         hits INT UNSIGNED NOT NULL DEFAULT 1,
         PRIMARY KEY (ip, action, window_start)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // colonne aggiunte dopo la prima versione (le tabelle online esistono già)
+    $have = $pdo->query("SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'scad_users'")->fetchAll(PDO::FETCH_COLUMN);
+    $add = [
+        'telegram_chat_id' => 'VARCHAR(32) NULL',
+        'notify_email' => 'TINYINT(1) NOT NULL DEFAULT 1',
+        'notify_telegram' => 'TINYINT(1) NOT NULL DEFAULT 1',
+    ];
+    foreach ($add as $col => $def) {
+        if (!in_array($col, $have, true)) {
+            $pdo->exec("ALTER TABLE scad_users ADD COLUMN $col $def");
+        }
+    }
 }
 
 function cors(): void {
@@ -254,6 +268,9 @@ function public_user(array $u): array {
         'lat' => $u['lat'] !== null ? (float) $u['lat'] : null,
         'lng' => $u['lng'] !== null ? (float) $u['lng'] : null,
         'remind_days' => $u['remind_days'],
+        'notify_email' => (bool) ($u['notify_email'] ?? true),
+        'notify_telegram' => (bool) ($u['notify_telegram'] ?? true),
+        'telegram_linked' => !empty($u['telegram_chat_id']),
     ];
 }
 

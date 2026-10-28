@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import { useApp } from '../App.jsx';
 import { Alert, Field, Icon } from '../ui.jsx';
 import ComuneSearch from './ComuneSearch.jsx';
+import Notifications from './Notifications.jsx';
 
 export default function Settings() {
   const { user, setUser, logout } = useApp();
@@ -74,6 +75,8 @@ export default function Settings() {
           <Link className="btn" to="/immobili"><Icon name="home" width="18" />Immobili</Link>
         </div>
       </div>
+
+      <Notifications />
 
       <form className="card" onSubmit={saveProfile}>
         <h2>Profilo</h2>

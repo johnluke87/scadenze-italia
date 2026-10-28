@@ -3,6 +3,7 @@ declare(strict_types=1);
 require __DIR__ . '/lib/bootstrap.php';
 require __DIR__ . '/lib/holidays.php';
 require __DIR__ . '/lib/templates.php';
+require __DIR__ . '/lib/telegram.php';
 
 cors();
 $path = route_path();
@@ -21,7 +22,34 @@ try {
             'categories' => categories(),
             'templates' => templates(),
             'holidays' => italian_holidays($y),
+            'telegram_bot' => tg_enabled() ? tg_config()['username'] : null,
         ]);
+    }
+
+    if ($path === '/telegram/webhook' && $method === 'POST') {
+        if (!tg_enabled() || !hash_equals(tg_secret(), (string) ($_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? ''))) {
+            fail('Non autorizzato.', 403);
+        }
+        tg_handle_update($body);
+        out(['ok' => true]);
+    }
+
+    // attiva il webhook del bot (una volta, dopo aver messo il token in private/scadenze-italia-telegram.php)
+    if ($path === '/telegram/setup' && $method === 'GET') {
+        $token = (string) cfg()['cron_token'];
+        if ($token === '' || !hash_equals($token, (string) ($_GET['token'] ?? ''))) {
+            fail('Non autorizzato.', 403);
+        }
+        if (!tg_enabled()) {
+            fail('Manca il bot: token e nome in private/scadenze-italia-telegram.php.');
+        }
+        $me = tg_api('getMe');
+        $hook = tg_api('setWebhook', [
+            'url' => app_url() . '/api/telegram/webhook',
+            'secret_token' => tg_secret(),
+            'allowed_updates' => ['message'],
+        ]);
+        out(['bot' => $me['result']['username'] ?? null, 'webhook' => !empty($hook['ok']), 'detail' => $hook['description'] ?? null]);
     }
 
     if ($path === '/geocode' && $method === 'GET') {
@@ -124,9 +152,11 @@ try {
             fail('Non autorizzato.', 403);
         }
         $today = (new DateTimeImmutable('today'))->format('Y-m-d');
-        $rows = db()->query("SELECT d.*, u.email, u.name AS uname, u.email_verified, u.remind_days AS udefault
+        $rows = db()->query("SELECT d.*, u.email, u.name AS uname, u.email_verified, u.remind_days AS udefault,
+                u.notify_email, u.notify_telegram, u.telegram_chat_id
             FROM scad_deadlines d JOIN scad_users u ON u.id=d.user_id WHERE d.status='open'")->fetchAll();
         $sent = 0;
+        $sentTg = 0;
         $skipped = 0;
         foreach ($rows as $d) {
             $days = $d['remind_days'] ?: $d['udefault'] ?: '30,7,1';
@@ -139,7 +169,9 @@ try {
                 if ($when !== $today) {
                     continue;
                 }
-                if (!(int) $d['email_verified']) {
+                $byMail = (int) $d['email_verified'] && (int) $d['notify_email'];
+                $byTg = !empty($d['telegram_chat_id']) && (int) $d['notify_telegram'] && tg_enabled();
+                if (!$byMail && !$byTg) {
                     $skipped++;
                     continue;
                 }
@@ -148,15 +180,23 @@ try {
                 } catch (PDOException) {
                     continue;
                 }
-                app_mail($d['email'], 'Scade ' . ($n === 0 ? 'oggi' : "tra $n giorni") . ': ' . $d['title'],
-                    '<p>Ciao ' . htmlspecialchars($d['uname']) . ',</p><p><strong>'
-                    . htmlspecialchars($d['title']) . '</strong> scade il <strong>'
-                    . htmlspecialchars((new DateTimeImmutable($d['due_date']))->format('d/m/Y')) . '</strong>.</p>'
-                    . '<p><a href="' . htmlspecialchars(app_url() . '/#/scadenza/' . (int) $d['id']) . '">Apri la scadenza</a></p>');
-                $sent++;
+                $quando = $n === 0 ? 'oggi' : ($n === 1 ? 'domani' : "tra $n giorni");
+                $date = (new DateTimeImmutable($d['due_date']))->format('d/m/Y');
+                $link = app_url() . '/#/scadenza/' . (int) $d['id'];
+                if ($byMail) {
+                    app_mail($d['email'], "Scade $quando: " . $d['title'],
+                        '<p>Ciao ' . htmlspecialchars($d['uname']) . ',</p><p><strong>'
+                        . htmlspecialchars($d['title']) . '</strong> scade il <strong>' . $date . '</strong>.</p>'
+                        . '<p><a href="' . htmlspecialchars($link) . '">Apri la scadenza</a></p>');
+                    $sent++;
+                }
+                if ($byTg && tg_send((string) $d['telegram_chat_id'],
+                    "⏰ <b>" . htmlspecialchars($d['title']) . "</b> scade $quando ($date).\n" . htmlspecialchars($link))) {
+                    $sentTg++;
+                }
             }
         }
-        out(['sent' => $sent, 'skipped_unverified' => $skipped]);
+        out(['sent' => $sent, 'sent_telegram' => $sentTg, 'skipped_no_channel' => $skipped]);
     }
 
     $u = require_user();
@@ -172,6 +212,11 @@ try {
         if (!preg_match('/^[0-9, ]+$/', $remind)) {
             fail('Giorni di preavviso non validi.');
         }
+        db()->prepare('UPDATE scad_users SET notify_email=?, notify_telegram=? WHERE id=?')->execute([
+            (int) (bool) ($body['notify_email'] ?? $u['notify_email']),
+            (int) (bool) ($body['notify_telegram'] ?? $u['notify_telegram']),
+            $uid,
+        ]);
         db()->prepare('UPDATE scad_users SET name=?, comune=?, provincia=?, regione=?, lat=?, lng=?, remind_days=? WHERE id=?')
             ->execute([
                 $name,
@@ -183,6 +228,24 @@ try {
                 $remind,
                 $uid,
             ]);
+        $u = db()->query('SELECT * FROM scad_users WHERE id=' . $uid)->fetch();
+        out(['user' => public_user($u)]);
+    }
+
+    // Collega Telegram: un codice valido 30 minuti, da aprire nel bot (t.me/BOT?start=CODICE)
+    if ($path === '/me/telegram' && $method === 'POST') {
+        if (!tg_enabled()) {
+            fail('Telegram non è ancora attivo.');
+        }
+        $code = issue_email_token($uid, 'telegram', '+30 minutes');
+        out(['url' => 'https://t.me/' . tg_config()['username'] . '?start=' . $code]);
+    }
+
+    if ($path === '/me/telegram' && $method === 'DELETE') {
+        if (!empty($u['telegram_chat_id'])) {
+            tg_send((string) $u['telegram_chat_id'], 'Scollegato da Scadenze Italia: qui non arrivano più promemoria.');
+        }
+        db()->prepare('UPDATE scad_users SET telegram_chat_id=NULL WHERE id=?')->execute([$uid]);
         $u = db()->query('SELECT * FROM scad_users WHERE id=' . $uid)->fetch();
         out(['user' => public_user($u)]);
     }
