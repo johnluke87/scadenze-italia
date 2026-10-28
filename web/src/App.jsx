@@ -185,14 +185,12 @@ function AppShell() {
   );
 }
 
+// Caffè, "scrivimi" e preferenze cookie li dà il pulsante comune di supporto/tip.js
 function Footer() {
-  const { config } = useApp();
   return (
     <footer className="footer">
       Scadenze Italia · gratis, senza pubblicità ·{' '}
       <NavLink to="/privacy">Privacy</NavLink>
-      {config?.donate_url && <> · <a href={config.donate_url} target="_blank" rel="noreferrer">Offrimi un caffè</a></>}
-      {' · '}<a href="../supporto/?app=scadenze-italia">Scrivimi</a>
     </footer>
   );
 }

@@ -235,3 +235,8 @@ input[type='checkbox'], input[type='radio'] { width: 20px; min-height: 20px; hei
 @media (prefers-reduced-motion: no-preference) {
   .btn, .tpl, .dl-item { transition: background-color 0.15s, border-color 0.15s; }
 }
+
+/* Pulsante del caffè comune (supporto/tip.js): sul telefono sopra la barra di navigazione in basso */
+@media (max-width: 899px) {
+  body #gd-tip { bottom: calc(72px + env(safe-area-inset-bottom)); }
+}
