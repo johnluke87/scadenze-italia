@@ -7,6 +7,10 @@ require __DIR__ . '/lib/templates.php';
 cors();
 $path = route_path();
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+// HEAD (es. il controllo di cron-job.org) come GET: Apache non manda il corpo della risposta
+if ($method === 'HEAD') {
+    $method = 'GET';
+}
 $body = json_body();
 
 try {
